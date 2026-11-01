@@ -2,7 +2,8 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [ main ]
+    # Fork gillou1664 : publie la branche « essai » (seule autorisée par l'environnement github-pages)
+    branches: [ essai ]
   workflow_dispatch:
 
 permissions:
