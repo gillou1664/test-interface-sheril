@@ -141,7 +141,7 @@ La galaxie est une grille (par défaut **60×60**) avec wrapping sur les bords (
 
 ### LocalStorage
 - `carte_*` : préférences de la carte (couches visibles, thème, présence/influence, zones, filtres, radars alliés…)
-- `carte_export_systemes` / `carte_export_radars` / `carte_export_detections` : contenu de « Exporter systèmes » (détections propres décochées par défaut)
+- `carte_export_systemes` / `carte_export_radars` / `carte_export_detections` / `carte_export_detections_alliance` : contenu de « Exporter systèmes » (détections propres et de l'alliance décochées par défaut)
 - `mapNotes` : annotations utilisateur sur la carte
 - `deplacements_tour_*` : ordres de déplacement saisis sur la carte, par tour
 - `recherche-technologique-tour-*` / `recherche-technologique-budget-tour-*` : allocation et budget de recherche par tour
@@ -198,7 +198,7 @@ Le projet reçoit beaucoup de contributions : chaque utilisateur doit pouvoir ga
 ### Carte
 - **Couches** : systèmes, radars (propres, flottes, alliés), secteurs, zones dessinées, influence (couleur des systèmes du commandant), présence (pondérée par la force et la distance du jeu), combats, fond sombre ou clair.
 - **Ordres de déplacement** : glisser-déposer d'une flotte depuis `FleetPicker` vers une case, ou bouton « → » de « Mes flottes » dans `InfoPanel`. Les ordres (cible, directive, stratégie de combat, précision n° planète/commandant) s'éditent dans le tiroir « Déplacements » en bas de la carte, qui copie le schéma d'ordres (`utils/ordreDeplacement.ts`). Flèche émeraude = cible à portée, rouge = hors de portée.
-- **Échange entre alliés** : « Exporter systèmes » produit un texte (systèmes + radars) qu'un allié colle dans « Importer systèmes » (`storage/radarsAlliesStorage.ts`). Case « Mes détections » (décochée par défaut) : ajoute les systèmes détectés au tour par les seuls radars du joueur (Tchebychev ≤ portée), sans les détections mises en commun par l'alliance, pour un commandant hors de l'alliance.
+- **Échange entre alliés** : « Exporter systèmes » produit un texte (systèmes + radars) qu'un allié colle dans « Importer systèmes » (`storage/radarsAlliesStorage.ts`). Case « Mes détections » (décochée par défaut) : ajoute les systèmes détectés au tour par les seuls radars du joueur (Tchebychev ≤ portée), sans les détections mises en commun par l'alliance, pour un commandant hors de l'alliance. Case « Détections de mon alliance » (décochée par défaut) : les autres systèmes détectés au tour, hors de portée des radars du joueur.
 
 ### Construction et revenus
 - **Revenus** (`PlanificationRevenu.tsx`) : par système, taxation (système ou planète), politique, budgets (technologique, services spéciaux, contre-espionnage), terraformation et affectation des gouverneurs ; changement de capitale (panneau « Capitale », avec aide au choix — `utils/capitale.ts`). Recalcule stabilité, croissance de population (détail par race), revenu, revenu technologique et bénéfice, avec infobulles détaillées ; les valeurs différentes du rapport sont marquées. Génère le schéma d'ordres (types dans l'ordre de résolution du tour) et peut envoyer le budget tech vers l'écran Recherche. Règles : `docs/gouverneurs-politiques-stocks.md`, `docs/ordres-revenus.md`.
