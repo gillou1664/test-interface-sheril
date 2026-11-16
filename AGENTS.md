@@ -81,6 +81,7 @@ src/
     ├── pdc.ts                 # PDC ajustés (politique, gouverneur, stock de robots)
     ├── reparation.ts          # Capacité de réparation d'un système
     ├── planificationRevenuStorage.ts # Choix de l'écran Revenus, par tour
+    ├── capitale.ts            # Modificateur de stabilité selon la distance à la capitale, aide au choix de la capitale
     ├── combatMarkers.ts       # Marqueurs de combat sur la carte
     ├── puissance.ts           # Calcul de puissance
     ├── planet.ts              # Infos planétaires
@@ -140,11 +141,15 @@ La galaxie est une grille (par défaut **60×60**) avec wrapping sur les bords (
 
 ### LocalStorage
 - `carte_*` : préférences de la carte (couches visibles, thème, présence/influence, zones, filtres, radars alliés…)
+- `carte_export_systemes` / `carte_export_radars` / `carte_export_detections` : contenu de « Exporter systèmes » (détections propres décochées par défaut)
 - `mapNotes` : annotations utilisateur sur la carte
 - `deplacements_tour_*` : ordres de déplacement saisis sur la carte, par tour
 - `recherche-technologique-tour-*` / `recherche-technologique-budget-tour-*` : allocation et budget de recherche par tour
 - `planification_*` : files de construction et préférences de l'écran Planification
+- `planification_show_en_cours` : prise en compte des constructions en cours dans l'écran Planification
+- `planification_en_cours_annulees_tour_*` : constructions en cours retirées à la main (simulation d'annulation), par tour
 - `planification_revenu_tour_*` : choix de l'écran Revenus, par tour
+- `planification_revenu_capitale_tour_*` : nouvelle capitale choisie dans l'écran Revenus (ordre changer_capitale), par tour
 - `transferts_tour_*` : ordres de transfert entre systèmes, par tour
 - `transferts_colonne_gauche` / `transferts_colonne_droite` : systèmes affichés dans les colonnes de l'écran Transferts
 - `sheril_detected_systems_v1` : systèmes saisis manuellement
@@ -193,11 +198,11 @@ Le projet reçoit beaucoup de contributions : chaque utilisateur doit pouvoir ga
 ### Carte
 - **Couches** : systèmes, radars (propres, flottes, alliés), secteurs, zones dessinées, influence (couleur des systèmes du commandant), présence (pondérée par la force et la distance du jeu), combats, fond sombre ou clair.
 - **Ordres de déplacement** : glisser-déposer d'une flotte depuis `FleetPicker` vers une case, ou bouton « → » de « Mes flottes » dans `InfoPanel`. Les ordres (cible, directive, stratégie de combat, précision n° planète/commandant) s'éditent dans le tiroir « Déplacements » en bas de la carte, qui copie le schéma d'ordres (`utils/ordreDeplacement.ts`). Flèche émeraude = cible à portée, rouge = hors de portée.
-- **Échange entre alliés** : « Exporter systèmes » produit un texte (systèmes + radars) qu'un allié colle dans « Importer systèmes » (`storage/radarsAlliesStorage.ts`).
+- **Échange entre alliés** : « Exporter systèmes » produit un texte (systèmes + radars) qu'un allié colle dans « Importer systèmes » (`storage/radarsAlliesStorage.ts`). Case « Mes détections » (décochée par défaut) : ajoute les systèmes détectés au tour par les seuls radars du joueur (Tchebychev ≤ portée), sans les détections mises en commun par l'alliance, pour un commandant hors de l'alliance.
 
 ### Construction et revenus
-- **Revenus** (`PlanificationRevenu.tsx`) : par système, taxation (système ou planète), politique, budgets (technologique, services spéciaux, contre-espionnage), terraformation et affectation des gouverneurs. Recalcule stabilité, croissance de population (détail par race), revenu, revenu technologique et bénéfice, avec infobulles détaillées ; les valeurs différentes du rapport sont marquées. Génère le schéma d'ordres (types dans l'ordre de résolution du tour) et peut envoyer le budget tech vers l'écran Recherche. Règles : `docs/gouverneurs-politiques-stocks.md`, `docs/ordres-revenus.md`.
-- **Construction** (`Planification.tsx`) : lit en lecture seule les choix de l'écran Revenus du même tour pour ajuster les PDC (politique, gouverneur, stock de robots — `utils/pdc.ts`). « Action multiple » (Alt+A) ajoute le maximum possible d'une construction dans chaque système, avec option pour se limiter aux systèmes ayant un chantier naval. Copie et import du schéma de construction.
+- **Revenus** (`PlanificationRevenu.tsx`) : par système, taxation (système ou planète), politique, budgets (technologique, services spéciaux, contre-espionnage), terraformation et affectation des gouverneurs ; changement de capitale (panneau « Capitale », avec aide au choix — `utils/capitale.ts`). Recalcule stabilité, croissance de population (détail par race), revenu, revenu technologique et bénéfice, avec infobulles détaillées ; les valeurs différentes du rapport sont marquées. Génère le schéma d'ordres (types dans l'ordre de résolution du tour) et peut envoyer le budget tech vers l'écran Recherche. Règles : `docs/gouverneurs-politiques-stocks.md`, `docs/ordres-revenus.md`.
+- **Construction** (`Planification.tsx`) : lit en lecture seule les choix de l'écran Revenus du même tour pour ajuster les PDC (politique, gouverneur, stock de robots — `utils/pdc.ts`). « Action multiple » (Alt+A) ajoute le maximum possible d'une construction dans chaque système, avec option pour se limiter aux systèmes ayant un chantier naval. Copie et import du schéma de construction. L'option « Constructions en cours » (bloc `<constructions>` du rapport XML) déduit de chaque système leurs PDC restants, puis le minerai et les marchandises de leur sortie — `docs/constructions-en-cours.md`.
 
 ### Transferts
 - Deux colonnes côte à côte, chacune avec son système (et sa planète, facultative) : un objet (minerai, bâtiment, marchandise) se glisse d'une colonne vers l'autre, ou s'envoie avec ses boutons → / ←, pour créer un ordre `charger_cargo`. Chaque ligne affiche le stock du rapport, l'effet des transferts, le stock après transferts et la production du tour.

@@ -1,14 +1,19 @@
-import React, { useMemo, useState, useEffect, useRef } from 'react';
+import React, { useMemo, useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { Lieutenant, SystemeJoueur } from '../types';
+import { Lieutenant, SystemeJoueur, XY } from '../types';
 import { useReport } from '../context/ReportContext';
-import { isPos, parsePosString, posToString } from '../utils/position';
-import { loadPlanificationRevenu, savePlanificationRevenu } from '../utils/planificationRevenuStorage';
+import { getTorusDistance, isPos, parsePosString, posToString } from '../utils/position';
+import { loadCapitaleRevenu, loadPlanificationRevenu, saveCapitaleRevenu, savePlanificationRevenu } from '../utils/planificationRevenuStorage';
+import { bilansCapitales, COUT_CHANGER_CAPITALE, modificateurStabiliteCapitale } from '../utils/capitale';
 import { ajouterPrefixeSchema } from '../utils/ordreSchema';
+import { appliquerATous, ChampBudget, depasseraitCent, plage, restaurer, valeursAvant } from '../utils/revenuMasse';
 
 interface SystemState {
     taxation: number;
+    // Taxation imposée à toutes les planètes même si elle vaut la moyenne du rapport
+    // (utile quand les planètes du système ont des taxations différentes)
+    taxationForcee?: boolean;
     btech: number;
     besp: number;
     bcont: number;
@@ -61,10 +66,17 @@ function etatDuRapport(s: SystemeJoueur, gouverneurs: Record<string, string>, nu
     };
 }
 
+// La taxation saisie doit-elle remplacer celle de chaque planète ?
+const taxationModifiee = (etat: SystemState, ref: SystemState) =>
+    etat.taxation !== ref.taxation || !!etat.taxationForcee;
+
 // Coût de terraformation d'une planète : 50 + (niveau + 1) × 2
 const coutTerraformationPlanete = (niveau: number) => 50 + (niveau + 1) * 2;
 
 const COULEUR_MODIFIE = '#ff9800';
+
+// Nombre signé : « +3 », « 0 », « -2 »
+const signeNombre = (n: number) => `${n > 0 ? '+' : ''}${n}`;
 
 // Style d'un champ dont la valeur diffère du rapport
 // Souligne en pointillés les éléments qui possèdent une infobulle
@@ -95,7 +107,7 @@ const POSITION_RESERVE = '0_0_0';
 const codePositionOrdre = (pos: { x: number; y: number }) => `0_${pos.x}_${pos.y}`;
 const SEPARATEUR_SCHEMA = '%#!%';
 // Types d'ordres dans l'ordre de résolution du tour (php/ordres/fr/ordres.txt) ; les budgets sont distingués par domaine
-const ORDRE_GROUPES = ['gouverneur', 'politique', 'budget_tech', 'budget_ss', 'budget_ce', 'taxation', 'terraformation'];
+const ORDRE_GROUPES = ['gouverneur', 'capitale', 'politique', 'budget_tech', 'budget_ss', 'budget_ce', 'taxation', 'terraformation'];
 const CROISSANCE_MIN_PLANETE = 10;
 // Bonus de croissance de population (en points de %) d'un stock important, absents du rapport
 const BONUS_POP_ALIMENTAIRE = 5;
@@ -215,6 +227,13 @@ function Change({ children, style, detail, rapport }: { children: string; style?
     );
 }
 
+// Saisie de la ligne « actions de masse » (chaîne vide : rien à appliquer pour cette colonne)
+type SaisieMasse = { politique: string; terraformation: string; taxation: string; btech: string; besp: string; bcont: string };
+const MASSE_VIDE: SaisieMasse = { politique: '', terraformation: '', taxation: '', btech: '', besp: '', bcont: '' };
+// Action de masse annulable : valeurs des champs remplacés, par système
+type ActionMasse = { libelle: string; avant: Record<string, Partial<SystemState>> };
+const LIBELLES_BUDGET: Record<ChampBudget, string> = { btech: 'budget tech', besp: 'budget SS', bcont: 'budget CE' };
+
 type Revenus = { revenus: number; benefice: number; revenu_tech: number; revenu_besp: number; revenu_bcont: number };
 const additionne = (lignes: Revenus[]): Revenus => lignes.reduce((acc, l) => ({
     revenus: acc.revenus + l.revenus,
@@ -249,6 +268,27 @@ export default function PlanificationRevenu() {
         return m;
     }, [gouverneursDuRapport]);
 
+    // --- Capitale ---
+    // Capitale du rapport, seulement si c'est un de nos systèmes (sans capitale, le parseur renvoie 1_1 par défaut)
+    const capitaleRapport = useMemo(() => {
+        const cap = rapport?.joueur.capitale;
+        return cap && systems.some(s => s.pos.x === cap.x && s.pos.y === cap.y) ? posToString(cap) : null;
+    }, [rapport, systems]);
+    // Nouvelle capitale choisie pour le tour (clé « x_y ») ; null : la capitale du rapport est conservée
+    const [capitaleStore, setCapitaleStore] = useState<{ tour: number | undefined; cle: string | null }>({ tour: undefined, cle: null });
+    useEffect(() => {
+        if (tour !== undefined) setCapitaleStore({ tour, cle: loadCapitaleRevenu(tour) });
+    }, [tour]);
+    const nouvelleCapitale = useMemo(() => {
+        const cle = capitaleStore.tour === tour ? capitaleStore.cle : null;
+        return systems.find(s => posToString(s.pos) === cle && cle !== capitaleRapport) ?? null;
+    }, [capitaleStore, tour, systems, capitaleRapport]);
+    const choisirCapitale = (cle: string | null) => {
+        const valeur = cle && cle !== capitaleRapport ? cle : null;
+        setCapitaleStore({ tour, cle: valeur });
+        if (tour !== undefined) saveCapitaleRevenu(tour, valeur);
+    };
+
     // Les états sont rattachés à un tour : un changement de rapport repart des valeurs du rapport
     const [store, setStore] = useState<{ tour: number | undefined; states: Record<string, SystemState> }>({ tour: undefined, states: {} });
     const states = useMemo(() => (store.tour === tour ? store.states : {}), [store, tour]);
@@ -277,10 +317,11 @@ export default function PlanificationRevenu() {
         if (tour !== undefined && store.tour === tour) savePlanificationRevenu(tour, store.states);
     }, [store, tour]);
 
-    const handleTaxChange = (key: string, val: number) => {
+    // Valeur de la liste : "2" (rapport / valeur choisie) ou "2f" (2 forcé sur toutes les planètes)
+    const handleTaxChange = (key: string, val: string) => {
         setStates(prev => ({
             ...prev,
-            [key]: { ...prev[key], taxation: val }
+            [key]: { ...prev[key], taxation: parseInt(val, 10), taxationForcee: val.endsWith('f') }
         }));
     };
 
@@ -335,21 +376,119 @@ export default function PlanificationRevenu() {
         const etats: Record<string, SystemState> = {};
         systems.forEach(s => { etats[posToString(s.pos)] = etatDuRapport(s, gouverneurs, numeroJoueur); });
         setStates(() => etats);
+        setHistorique({ tour, pile: [] });
+        choisirCapitale(null);
     };
 
     const handleTerraChange = (key: string, val: boolean) => {
         setStates(prev => ({
             ...prev,
-            [key]: { 
-                ...prev[key], 
+            [key]: {
+                ...prev[key],
                 terraformation: val
             }
         }));
     };
 
+    // --- Actions de masse ---
+    // Systèmes exclus de la sélection : par défaut, tous les systèmes sont sélectionnés
+    const [exclus, setExclus] = useState<Set<string>>(() => new Set());
+    const cles = useMemo(() => systems.map(s => posToString(s.pos)), [systems]);
+    const selection = useMemo(() => cles.filter(k => !exclus.has(k)), [cles, exclus]);
+    const nbSelection = selection.length;
+    const dernierCoche = useRef<number | null>(null);
+
+    // Maj+clic : la case cliquée donne son nouvel état à toute la plage depuis la dernière case cliquée
+    const basculerSelection = (index: number, selectionne: boolean, plageDemandee: boolean) => {
+        const concernees = plageDemandee && dernierCoche.current !== null ? plage(cles, dernierCoche.current, index) : [cles[index]];
+        dernierCoche.current = index;
+        setExclus(prev => {
+            const next = new Set(prev);
+            concernees.forEach(k => (selectionne ? next.delete(k) : next.add(k)));
+            return next;
+        });
+    };
+    const toutSelectionner = (oui: boolean) => {
+        dernierCoche.current = null;
+        setExclus(oui ? new Set() : new Set(cles));
+    };
+
+    const [masse, setMasse] = useState<SaisieMasse>(MASSE_VIDE);
+    const [historique, setHistorique] = useState<{ tour: number | undefined; pile: ActionMasse[] }>({ tour: undefined, pile: [] });
+    const pileAnnulation = historique.tour === tour ? historique.pile : [];
+
+    // Applique une modification aux systèmes donnés, en gardant de quoi l'annuler
+    const appliquerMasse = (libelle: string, cibles: string[], maj: (etat: SystemState, cle: string) => Partial<SystemState>) => {
+        if (cibles.length === 0) return;
+        const avant: Record<string, Partial<SystemState>> = {};
+        cibles.forEach(k => { if (states[k]) avant[k] = valeursAvant(states[k], maj(states[k], k)); });
+        setStates(prev => appliquerATous(prev, cibles, maj));
+        setHistorique(prev => ({ tour, pile: [...(prev.tour === tour ? prev.pile : []), { libelle: `${libelle} sur ${cibles.length} système${cibles.length > 1 ? 's' : ''}`, avant }] }));
+    };
+
+    const annulerMasse = () => {
+        const derniere = pileAnnulation[pileAnnulation.length - 1];
+        if (!derniere) return;
+        setStates(prev => restaurer(prev, derniere.avant));
+        setHistorique({ tour, pile: pileAnnulation.slice(0, -1) });
+    };
+
+    // Systèmes dont les taxations diffèrent entre planètes : une taxation de masse doit être forcée sur toutes
+    const taxationsHeterogenes = useMemo(() => new Set(systems
+        .filter(s => new Set(planetesDuJoueur(s, numeroJoueur).map(p => p.tax)).size > 1)
+        .map(s => posToString(s.pos))), [systems, numeroJoueur]);
+
+    const appliquerMassePolitique = () => {
+        const v = parseInt(masse.politique, 10);
+        appliquerMasse(`politique ${global?.politiques[v] ?? v}`, selection, () => ({ politique: v }));
+        setMasse(m => ({ ...m, politique: '' }));
+    };
+    const appliquerMasseTerraformation = () => {
+        const v = masse.terraformation === 'avec';
+        appliquerMasse(v ? 'terraformation' : 'sans terraformation', selection, () => ({ terraformation: v }));
+        setMasse(m => ({ ...m, terraformation: '' }));
+    };
+    const appliquerMasseTaxation = () => {
+        const v = parseInt(masse.taxation, 10);
+        appliquerMasse(`taxation ${v}`, selection, (_, k) => ({ taxation: v, taxationForcee: taxationsHeterogenes.has(k) }));
+        setMasse(m => ({ ...m, taxation: '' }));
+    };
+    // Systèmes sélectionnés dont le total des budgets dépasserait 100 % avec la valeur saisie
+    const depassementsBudget = (champ: ChampBudget) => {
+        const v = parseInt(masse[champ], 10);
+        if (isNaN(v)) return [];
+        return selection.filter(k => states[k] && depasseraitCent(states[k], champ, v));
+    };
+    const appliquerMasseBudget = (champ: ChampBudget, ignorerDepassements: boolean) => {
+        const v = parseInt(masse[champ], 10);
+        if (isNaN(v)) return;
+        const ignores = ignorerDepassements ? new Set(depassementsBudget(champ)) : new Set<string>();
+        appliquerMasse(`${LIBELLES_BUDGET[champ]} ${v} %`, selection.filter(k => !ignores.has(k)), () => ({ [champ]: v }));
+        setMasse(m => ({ ...m, [champ]: '' }));
+    };
+    const saisirMasseBudget = (champ: ChampBudget, val: string) => {
+        const n = parseInt(val, 10);
+        setMasse(m => ({ ...m, [champ]: isNaN(n) ? '' : String(Math.max(0, Math.min(100, n))) }));
+    };
+
+    // La ligne de masse est collée sous la ligne d'en-tête : il faut connaître la hauteur de celle-ci
+    const ligneEnTete = useRef<HTMLTableRowElement>(null);
+    const [hauteurEnTete, setHauteurEnTete] = useState(0);
+    useLayoutEffect(() => {
+        const ligne = ligneEnTete.current;
+        if (!ligne) return;
+        const mesure = () => setHauteurEnTete(ligne.offsetHeight);
+        mesure();
+        if (typeof ResizeObserver === 'undefined') return;
+        const observateur = new ResizeObserver(mesure);
+        observateur.observe(ligne);
+        return () => observateur.disconnect();
+    }, []);
+
     const rows = useMemo(() => {
-        // Calcul d'un système pour un état donné (choix de l'utilisateur ou état du rapport)
-        const calcul = (s: SystemeJoueur, state: SystemState) => {
+        // Calcul d'un système pour un état donné (choix de l'utilisateur ou état du rapport).
+        // `capitale` : nouvelle capitale choisie, qui remplace le modificateur « position » du rapport ; absente, on garde celui du rapport
+        const calcul = (s: SystemeJoueur, state: SystemState, capitale?: XY) => {
             const key = posToString(s.pos);
 
             // Le rapport reflète déjà la politique actuelle : on n'applique que l'écart avec la politique choisie
@@ -379,6 +518,8 @@ export default function PlanificationRevenu() {
                     variation_stab += taxModif;
                 } else if (evo.t === 'gouverneur') {
                     // remplacé par l'apport du gouverneur choisi
+                } else if (evo.t === 'position' && capitale) {
+                    // remplacé par le modificateur de distance à la nouvelle capitale
                 } else {
                     variation_stab += (evo.v || 0);
                     detailStab.push(`${evo.t} : ${signe(evo.v || 0)}`);
@@ -388,6 +529,12 @@ export default function PlanificationRevenu() {
             // L'énoncé dit "lorsque je change une taxation, il faut remplacé le taxation par le modificateur de stab"
             if (!evostab.some(evo => evo.t === 'taxation')) {
                 variation_stab += taxModif;
+            }
+            if (capitale) {
+                const distance = getTorusDistance(capitale, s.pos);
+                const modPosition = modificateurStabiliteCapitale(distance, global?.modificateursStabilite);
+                variation_stab += modPosition;
+                detailStab.push(`position : ${signe(modPosition)} (distance ${distance} à la nouvelle capitale [${capitale.x}-${capitale.y}])`);
             }
             detailStab.push(`taxation ${state.taxation} : ${signe(taxModif)}`);
             variation_stab += deltaStabPolitique;
@@ -415,7 +562,7 @@ export default function PlanificationRevenu() {
             let populationMax = 0;
             let revenuPlanetes = 0;
             let revenuPlanetesTech = 0;
-            const taxationModifiee = state.taxation !== etatDuRapport(s, gouverneurs, numeroJoueur).taxation;
+            const taxationSaisie = taxationModifiee(state, etatDuRapport(s, gouverneurs, numeroJoueur));
 
             mesPlanetes.forEach(p => {
                 const pPop = (p.populations ?? []).reduce((acc, pop) => acc + (pop.nb || 0), 0);
@@ -437,7 +584,7 @@ export default function PlanificationRevenu() {
                 if (pPop > 0) pGrowth = Math.min(Math.max(pGrowth, CROISSANCE_MIN_PLANETE), Math.max(0, pMax - pPop));
 
                 // Taxation du système si l'utilisateur l'a modifiée, sinon celle de la planète dans le rapport
-                const taxPlanete = taxationModifiee ? state.taxation : p.tax;
+                const taxPlanete = taxationSaisie ? state.taxation : p.tax;
                 // Pas d'arrondi : le revenu du rapport est exactement la somme de pop × taxation / 10
                 const revenuPlanete = (pPop + pGrowth) * taxPlanete / 10;
 
@@ -537,13 +684,28 @@ export default function PlanificationRevenu() {
         return systems.map(s => {
             const key = posToString(s.pos);
             return {
-                ...calcul(s, states[key] || etatDuRapport(s, gouverneurs, numeroJoueur)),
+                ...calcul(s, states[key] || etatDuRapport(s, gouverneurs, numeroJoueur), nouvelleCapitale?.pos),
                 rapport: calcul(s, etatDuRapport(s, gouverneurs, numeroJoueur)),
             };
         });
-    }, [systems, states, global, gouverneursDuRapport, gouverneurs, numeroJoueur]);
+    }, [systems, states, global, gouverneursDuRapport, gouverneurs, numeroJoueur, nouvelleCapitale]);
 
     const totals = useMemo(() => additionne(rows), [rows]);
+
+    // Aide au choix de la capitale : pour chaque système, somme des modificateurs « position » de tout l'empire s'il devenait la capitale
+    const aideCapitale = useMemo(() => {
+        const mods = global?.modificateursStabilite;
+        const bilans = bilansCapitales(systems.map(s => s.pos), mods);
+        const nom = (cle: string) => {
+            const s = systems.find(x => posToString(x.pos) === cle);
+            return s ? `[${s.pos.x}-${s.pos.y}] ${s.nom}` : cle;
+        };
+        // Sans capitale, chaque système subit le malus maximal
+        const malusSansCapitale = modificateurStabiliteCapitale(null, mods);
+        const actuel = bilans.find(b => b.cle === capitaleRapport)
+            ?? { total: systems.length * malusSansCapitale, nbMalus: malusSansCapitale < 0 ? systems.length : 0 };
+        return { bilans, nom, actuel, malusSansCapitale };
+    }, [systems, global, capitaleRapport]);
 
     // Coût de la terraformation des systèmes cochés (somme sur les planètes du joueur)
     const terraformation = useMemo(() => {
@@ -579,7 +741,7 @@ export default function PlanificationRevenu() {
                 // pas d'ordre pour annuler une terraformation : le rapport ne la contient jamais
                 ajoute('terraformation', `${pos} ${etat.terraformation ? 'terraformation' : 'sans terraformation'}`, etat.terraformation ? ['terraformer_systeme', codePos] : undefined);
             }
-            if (etat.taxation !== ref.taxation) {
+            if (taxationModifiee(etat, ref)) {
                 ajoute('taxation', `${pos} taxation ${etat.taxation}`, ['modifier_taxation_systeme', codePos, String(etat.taxation)]);
             }
             if (etat.politique !== ref.politique) {
@@ -596,6 +758,10 @@ export default function PlanificationRevenu() {
                 ajoute('budget_ce', `${pos} budget CE ${etat.bcont}%`, ['modifier_budget', codePos, String(BUDGET_CE), String(etat.bcont)]);
             }
         });
+        if (nouvelleCapitale) {
+            ajoute('capitale', `Capitale [${nouvelleCapitale.pos.x}-${nouvelleCapitale.pos.y}] ${nouvelleCapitale.nom} (${COUT_CHANGER_CAPITALE} centaures)`,
+                ['changer_capitale', codePositionOrdre(nouvelleCapitale.pos)]);
+        }
         // Changements d'affectation : on ne donne que la nouvelle affectation du lieutenant
         const affectation = (etats: (s: SystemeJoueur) => string | null, format: (s: SystemeJoueur) => string = s => `[${s.pos.x}-${s.pos.y}] ${s.nom}`) => {
             const m: Record<string, string> = {};
@@ -618,7 +784,7 @@ export default function PlanificationRevenu() {
             lignes: ORDRE_GROUPES.flatMap(g => groupes[g].lignes),
             serveur: ORDRE_GROUPES.flatMap(g => groupes[g].serveur),
         };
-    }, [systems, states, gouverneurs, gouverneursDuRapport, global, numeroJoueur]);
+    }, [systems, states, gouverneurs, gouverneursDuRapport, global, numeroJoueur, nouvelleCapitale]);
     // Schéma à coller dans la console d'ordres : « table:param:param » par ordre, séparés par %#!%, le tout en base64 (UTF-8)
     const schema = useMemo(() => {
         if (ordresServeur.length === 0) return '';
@@ -646,11 +812,21 @@ export default function PlanificationRevenu() {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #444', paddingBottom: '4px', marginBottom: '8px', flexShrink: 0 }}>
                 <h2 style={{ color: '#fff', margin: 0, fontSize: '1.1em' }}>Planification des Revenus</h2>
                 <div style={{ display: 'flex', gap: '8px' }}>
+                {pileAnnulation.length > 0 && (
+                    <button
+                        type="button"
+                        onClick={annulerMasse}
+                        title={`Annuler : ${pileAnnulation[pileAnnulation.length - 1].libelle}`}
+                        style={{ ...resetButtonStyle, padding: '6px 12px', ...SOULIGNE_INFOBULLE, cursor: 'pointer' }}
+                    >
+                        ↶ Annuler l'action de masse
+                    </button>
+                )}
                 <button
                     type="button"
                     onClick={copierSchema}
                     disabled={!schema}
-                    title="Copier le schéma des ordres (taxation, politique, budgets, terraformation, gouverneurs) à coller dans la console d'ordres"
+                    title="Copier le schéma des ordres (capitale, taxation, politique, budgets, terraformation, gouverneurs) à coller dans la console d'ordres"
                     style={{ ...resetButtonStyle, padding: '6px 12px', ...SOULIGNE_INFOBULLE, opacity: schema ? 1 : 0.3, cursor: schema ? 'pointer' : 'default' }}
                 >
                     {schemaCopie ? '✓ Schéma copié' : 'Copier le schéma des ordres'}
@@ -728,6 +904,73 @@ export default function PlanificationRevenu() {
                 </div>
             </div>
 
+            <div style={{
+                flex: '0 1 auto',
+                minWidth: 260,
+                padding: '8px 12px',
+                backgroundColor: '#2a2a2a',
+                borderRadius: '8px',
+                boxShadow: '0 2px 4px rgba(0,0,0,0.3)',
+                fontSize: '0.9em',
+            }}>
+                <strong style={{ color: '#aaa', textTransform: 'uppercase', fontSize: '0.8em' }}>Capitale</strong>
+                <div
+                    style={{ marginTop: '4px', color: '#aaa', cursor: 'help', ...SOULIGNE_INFOBULLE }}
+                    title={`Chaque système reçoit à chaque tour un modificateur de stabilité selon sa distance à la capitale (ligne « position »).\nΣ = somme de ces modificateurs sur vos ${systems.length} systèmes.`}
+                >
+                    Actuelle : <b style={{ color: '#fff' }}>{capitaleRapport ? aideCapitale.nom(capitaleRapport) : 'aucune'}</b>
+                    {' '}(Σ {signeNombre(aideCapitale.actuel.total)}
+                    {!capitaleRapport && `, ${signeNombre(aideCapitale.malusSansCapitale)} par système`})
+                </div>
+                <div style={{ marginTop: '4px' }}>
+                    <select
+                        value={nouvelleCapitale ? posToString(nouvelleCapitale.pos) : ''}
+                        onChange={e => choisirCapitale(e.target.value || null)}
+                        title={`Changer de capitale (ordre changer_capitale, ${COUT_CHANGER_CAPITALE} centaures, un seul par tour).\nSystèmes classés du meilleur au moins bon : Σ des modificateurs « position », écart avec la capitale actuelle, nombre de systèmes en malus.`}
+                        style={styleModifie({ ...selectStyle, maxWidth: 340 }, !!nouvelleCapitale)}
+                    >
+                        <option value="">{capitaleRapport ? 'Conserver la capitale actuelle' : 'Pas de nouvelle capitale'}</option>
+                        {aideCapitale.bilans.filter(b => b.cle !== capitaleRapport).map(b => (
+                            <option key={b.cle} value={b.cle}>
+                                {`${aideCapitale.nom(b.cle)} : Σ ${signeNombre(b.total)} (${signeNombre(b.total - aideCapitale.actuel.total)}), ${b.nbMalus} en malus`}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+                {nouvelleCapitale && (() => {
+                    const bilan = aideCapitale.bilans.find(b => b.cle === posToString(nouvelleCapitale.pos));
+                    const ecart = bilan ? bilan.total - aideCapitale.actuel.total : 0;
+                    return (
+                        <div style={{ marginTop: '4px', color: '#aaa' }}>
+                            Stabilité par tour : <b style={{ color: ecart >= 0 ? '#4caf50' : '#f44336' }}>{signeNombre(ecart)}</b> au total
+                            {' '}· Coût : <b style={{ color: '#fff' }}>{COUT_CHANGER_CAPITALE}</b> centaures
+                        </div>
+                    );
+                })()}
+                {(() => {
+                    const meilleure = aideCapitale.bilans[0];
+                    if (!meilleure) return null;
+                    if (meilleure.cle === capitaleRapport || meilleure.total <= aideCapitale.actuel.total) {
+                        return <div style={{ marginTop: '4px', color: '#666' }}>La capitale actuelle est déjà la meilleure position.</div>;
+                    }
+                    if (nouvelleCapitale && posToString(nouvelleCapitale.pos) === meilleure.cle) return null;
+                    return (
+                        <div style={{ marginTop: '4px', color: '#aaa' }}>
+                            Meilleure : <b style={{ color: '#fff' }}>{aideCapitale.nom(meilleure.cle)}</b>
+                            {' '}(<span style={{ color: '#4caf50' }}>{signeNombre(meilleure.total - aideCapitale.actuel.total)}</span>)
+                            <button
+                                type="button"
+                                onClick={() => choisirCapitale(meilleure.cle)}
+                                title="Choisir ce système comme nouvelle capitale"
+                                style={{ ...boutonMasseStyle, marginLeft: '6px', cursor: 'pointer' }}
+                            >
+                                Choisir
+                            </button>
+                        </div>
+                    );
+                })()}
+            </div>
+
                 <div style={{ flex: 1, minWidth: 220, position: 'relative', backgroundColor: '#2a2a2a', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.3)' }}>
                     {/* contenu en absolu : la hauteur reste celle des totaux, la liste défile */}
                     <div style={{ position: 'absolute', inset: 0, padding: '15px', overflowY: 'auto' }}>
@@ -743,7 +986,17 @@ export default function PlanificationRevenu() {
             <div style={{ overflow: 'auto', flex: 1, minHeight: 200 }}>
                 <table className="planification_table" style={{ width: '100%', borderCollapse: 'collapse', backgroundColor: '#1e1e1e', borderRadius: '8px', overflow: 'hidden' }}>
                     <thead>
-                        <tr style={{ backgroundColor: '#333', color: '#ccc', textAlign: 'left' }}>
+                        <tr ref={ligneEnTete} style={{ backgroundColor: '#333', color: '#ccc', textAlign: 'left' }}>
+                            <th style={thStyle}>
+                                <input
+                                    type="checkbox"
+                                    checked={nbSelection === cles.length && cles.length > 0}
+                                    ref={el => { if (el) el.indeterminate = nbSelection > 0 && nbSelection < cles.length; }}
+                                    onChange={e => toutSelectionner(e.target.checked)}
+                                    title="Sélectionner tous les systèmes ou aucun, pour les actions de masse"
+                                    style={caseSelectionStyle}
+                                />
+                            </th>
                             <th style={thStyle}>Position</th>
                             <th style={thStyle}>Nom</th>
                             <th style={thStyle}>Stabilité</th>
@@ -761,6 +1014,97 @@ export default function PlanificationRevenu() {
                             <th style={thStyle}>Revenu CE</th>
                             <th style={thStyle}></th>
                         </tr>
+                        {/* Actions de masse : chaque contrôle est dans la colonne qu'il modifie et s'applique aux systèmes cochés */}
+                        <tr>
+                            {(() => {
+                                const th: React.CSSProperties = { ...thStyle, ...thMasseStyle, top: hauteurEnTete };
+                                const aucun = nbSelection === 0;
+                                const bouton = (onClick: () => void, libelle = `✓ Appliquer (${nbSelection})`, titre = `Appliquer aux ${nbSelection} système(s) coché(s)`) => (
+                                    <button type="button" onClick={onClick} disabled={aucun} title={titre}
+                                        style={{ ...boutonMasseStyle, ...SOULIGNE_INFOBULLE, opacity: aucun ? 0.3 : 1, cursor: aucun ? 'default' : 'pointer' }}>
+                                        {libelle}
+                                    </button>
+                                );
+                                const politiqueCodes = Object.keys(global?.politiques || {}).map(Number)
+                                    .filter(c => !global?.politiques[c]?.startsWith('anti-'))
+                                    .sort((a, b) => a - b);
+                                const celluleBudget = (champ: ChampBudget) => {
+                                    const depassements = masse[champ] !== '' ? depassementsBudget(champ) : [];
+                                    const noms = depassements.map(k => systems.find(s => posToString(s.pos) === k)?.nom ?? k).join(', ');
+                                    return (
+                                        <th style={th} colSpan={2}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
+                                                <input
+                                                    type="number" min="0" max="100" placeholder="—"
+                                                    value={masse[champ]}
+                                                    onChange={e => saisirMasseBudget(champ, e.target.value)}
+                                                    onKeyDown={e => { if (e.key === 'Enter' && !aucun && depassements.length === 0) appliquerMasseBudget(champ, false); }}
+                                                    title={`${LIBELLES_BUDGET[champ]} à appliquer aux systèmes cochés (Entrée pour appliquer)`}
+                                                    style={inputStyle}
+                                                />
+                                                <span style={{ fontSize: '0.8em', color: '#666' }}>%</span>
+                                                {masse[champ] !== '' && depassements.length === 0 && bouton(() => appliquerMasseBudget(champ, false))}
+                                            </div>
+                                            {depassements.length > 0 && (
+                                                <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
+                                                    <span style={{ color: '#f44336', cursor: 'help', ...SOULIGNE_INFOBULLE }} title={`Total des budgets au-delà de 100 % : ${noms}\nLe serveur annule tous les budgets d'un système qui dépasse 100 %.`}>
+                                                        ⚠ {depassements.length} dépasserai{depassements.length > 1 ? 'ent' : 't'} 100 %
+                                                    </span>
+                                                    {depassements.length < nbSelection && bouton(() => appliquerMasseBudget(champ, true), `Sans ces ${depassements.length} (${nbSelection - depassements.length})`, `Appliquer aux ${nbSelection - depassements.length} autre(s) système(s) coché(s), sans toucher à : ${noms}`)}
+                                                    {bouton(() => appliquerMasseBudget(champ, false), `Tous quand même (${nbSelection})`, `Appliquer aux ${nbSelection} système(s) coché(s), y compris : ${noms}`)}
+                                                </div>
+                                            )}
+                                        </th>
+                                    );
+                                };
+                                return (
+                                    <>
+                                        <th style={th}></th>
+                                        <th style={{ ...th, color: '#aaa', fontWeight: 'normal' }} colSpan={3}>
+                                            Actions de masse : <b style={{ color: '#fff' }}>{nbSelection}</b> / {cles.length} système{cles.length > 1 ? 's' : ''} coché{nbSelection > 1 ? 's' : ''}
+                                        </th>
+                                        <th style={th}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
+                                                <select value={masse.politique} onChange={e => setMasse(m => ({ ...m, politique: e.target.value }))} style={selectStyle} title="Politique à appliquer aux systèmes cochés">
+                                                    <option value="">—</option>
+                                                    {politiqueCodes.map(c => {
+                                                        const eff = formatEffetPolitique(c);
+                                                        return <option key={c} value={c}>{global?.politiques[c]}{eff ? ` (${eff})` : ''}</option>;
+                                                    })}
+                                                </select>
+                                                {masse.politique !== '' && bouton(appliquerMassePolitique)}
+                                            </div>
+                                        </th>
+                                        <th style={th}></th>
+                                        <th style={th}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
+                                                <select value={masse.terraformation} onChange={e => setMasse(m => ({ ...m, terraformation: e.target.value }))} style={selectStyle} title="Cocher ou décocher la terraformation des systèmes cochés">
+                                                    <option value="">—</option>
+                                                    <option value="avec">avec</option>
+                                                    <option value="sans">sans</option>
+                                                </select>
+                                                {masse.terraformation !== '' && bouton(appliquerMasseTerraformation)}
+                                            </div>
+                                        </th>
+                                        <th style={th}></th>
+                                        <th style={th}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
+                                                <select value={masse.taxation} onChange={e => setMasse(m => ({ ...m, taxation: e.target.value }))} style={selectStyle} title="Taxation à appliquer à toutes les planètes des systèmes cochés">
+                                                    <option value="">—</option>
+                                                    {[0, 1, 2, 3, 4, 5].map(t => <option key={t} value={t}>{t}</option>)}
+                                                </select>
+                                                {masse.taxation !== '' && bouton(appliquerMasseTaxation)}
+                                            </div>
+                                        </th>
+                                        <th style={th}></th>
+                                        {celluleBudget('btech')}
+                                        {celluleBudget('besp')}
+                                        {celluleBudget('bcont')}
+                                        <th style={th}></th>
+                                    </>
+                                );
+                            })()}
+                        </tr>
                     </thead>
                     <tbody>
                         {systems.map((s, idx) => {
@@ -773,7 +1117,7 @@ export default function PlanificationRevenu() {
                             const modPolitique = state.politique !== ref.politique;
                             const modTerra = state.terraformation !== ref.terraformation;
                             const modGouv = state.gouverneur !== ref.gouverneur;
-                            const modTax = state.taxation !== ref.taxation;
+                            const modTax = taxationModifiee(state, ref);
                             // Taxations différentes entre les planètes du joueur : la valeur affichée n'est qu'une moyenne
                             const planetesTax = planetesDuJoueur(s, numeroJoueur);
                             const taxationsHeterogenes = new Set(planetesTax.map(p => p.tax)).size > 1;
@@ -793,6 +1137,15 @@ export default function PlanificationRevenu() {
 
                             return (
                                 <tr key={row.key} style={{ borderBottom: '1px solid #333', backgroundColor: idx % 2 === 0 ? '#1e1e1e' : '#252525' }}>
+                                    <td style={tdStyle}>
+                                        <input
+                                            type="checkbox"
+                                            checked={!exclus.has(key)}
+                                            onChange={e => basculerSelection(idx, e.target.checked, (e.nativeEvent as MouseEvent).shiftKey)}
+                                            title="Inclure ce système dans les actions de masse (Maj+clic : toute la plage depuis la dernière case cliquée)"
+                                            style={caseSelectionStyle}
+                                        />
+                                    </td>
                                     <td style={tdStyle}>{row.pos}</td>
                                     <td style={{ ...tdStyle, fontWeight: 'bold' }}>{row.nom}</td>
                                     <td style={tdStyle}>
@@ -849,12 +1202,17 @@ export default function PlanificationRevenu() {
                                     </td>
                                     <td style={tdStyle}>
                                         <select 
-                                            value={row.taxation} 
-                                            onChange={(e) => handleTaxChange(row.key, parseInt(e.target.value, 10))}
+                                            value={state.taxationForcee && state.taxation === ref.taxation ? `${state.taxation}f` : String(state.taxation)}
+                                            onChange={(e) => handleTaxChange(row.key, e.target.value)}
                                             style={{ ...styleModifie(selectStyle, modTax), ...(modTax ? SOULIGNE_INFOBULLE : {}) }}
-                                            title={modTax ? `Rapport : ${ref.taxation}` : undefined}
+                                            title={modTax ? `Rapport : ${taxationsHeterogenes ? `planètes de ${planetesTax.map(p => p.tax).join(', ')}` : ref.taxation}` : undefined}
                                         >
-                                            {[0, 1, 2, 3, 4, 5].map(t => <option key={t} value={t}>{t}</option>)}
+                                            {[0, 1, 2, 3, 4, 5].flatMap(t => (taxationsHeterogenes && t === ref.taxation
+                                                ? [
+                                                    <option key={t} value={t}>{t} - rapport</option>,
+                                                    <option key={`${t}f`} value={`${t}f`}>{t} - forcé</option>,
+                                                ]
+                                                : [<option key={t} value={t}>{t}</option>]))}
                                         </select>
                                         {marque(modTax)}
                                         {taxationsHeterogenes && (
@@ -961,6 +1319,29 @@ const selectStyle: React.CSSProperties = {
     padding: '4px 6px',
     fontSize: '0.9em',
     cursor: 'pointer'
+};
+
+const caseSelectionStyle: React.CSSProperties = { cursor: 'pointer', width: '16px', height: '16px' };
+
+// Ligne des actions de masse : distincte de l'en-tête (pas de majuscules, fond plus clair)
+const thMasseStyle: React.CSSProperties = {
+    padding: '6px 8px',
+    textTransform: 'none',
+    letterSpacing: 'normal',
+    fontWeight: 'normal',
+    backgroundColor: '#1f2a3a',
+    verticalAlign: 'top',
+    zIndex: 9,
+};
+
+const boutonMasseStyle: React.CSSProperties = {
+    backgroundColor: '#2e4a6b',
+    color: '#fff',
+    border: '1px solid #4f7aa8',
+    borderRadius: '4px',
+    padding: '3px 8px',
+    fontSize: '0.85em',
+    whiteSpace: 'nowrap',
 };
 
 const resetButtonStyle: React.CSSProperties = {

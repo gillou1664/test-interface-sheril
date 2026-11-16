@@ -7,16 +7,19 @@ import ZoneDialog from '../components/Map/ZoneDialog';
 import MapHelp from '../components/Map/MapHelp';
 import GotoDialog from '../components/Map/GotoDialog';
 import {FleetPicker} from '../components/Map/FleetPicker';
+import FleetFilters from '../components/Map/fleets/FleetFilters';
 import {isTypingTarget} from '../utils/keyboard';
 import {wrapX, wrapY, posToString} from '../utils/position';
 import {computePresence, PresenceData} from '../utils/presence';
 import {adaptColorToTheme, MAP_THEMES, MapThemeName} from '../utils/mapTheme';
+import {FleetOwnerVisibility, FleetPowerRange, isFleetVisible, MapFleet, restoreFleetPowerRange} from '../utils/fleetModel';
 import Modal from '../components/utils/Modal';
 import {GlobalData, Strategie, XY, Zone} from '../types';
 import {DropdownOption, MultiSelectDropdown} from "../components/multiselect";
 import {loadDeplacements, saveDeplacements, clearDeplacements} from '../storage/deplacementOrdersStorage';
 import {DeplacementEnAttente, DeplacementOrdre, DIRECTIVE_DEFAUT, OPTIONS_DIRECTIVES, PRECISION_DEFAUT, PRECISION_PLANETE_MAX, PRECISION_PLANETE_MIN, STRATEGIE_DEFAUT, schemaDeplacements} from '../utils/ordreDeplacement';
 import {copierSchema} from '../utils/ordreSchema';
+import {nouvelleCapitaleOrdonnee} from '../utils/capitale';
 import {exportSystemesJoueur} from '../parsers/parseManualSystems';
 import {
   IconSystem,
@@ -107,6 +110,26 @@ export default function Carte() {
     const saved = localStorage.getItem('carte_show_fleet_badges');
     return saved !== null ? JSON.parse(saved) : true;
   });
+  // Filtres de flottes : plage de puissance (seuils du jeu) + visibilité par propriétaire
+  const [fleetPowerRange, setFleetPowerRange] = useState<FleetPowerRange>(() =>
+    restoreFleetPowerRange(localStorage.getItem('carte_fleet_power_range')));
+  const [showOwnFleets, setShowOwnFleets] = useState(() => localStorage.getItem('carte_show_own_fleets') !== 'false');
+  const [showNeutralFleets, setShowNeutralFleets] = useState(() => localStorage.getItem('carte_show_neutral_fleets') !== 'false');
+  const fleetVisibility = useMemo<FleetOwnerVisibility>(
+    () => ({showOwn: showOwnFleets, showNeutral: showNeutralFleets}),
+    [showOwnFleets, showNeutralFleets]);
+  // Compteur « visibles / total » : même liste de flottes que la carte (nôtres + détectées)
+  const fleetCounts = useMemo(() => {
+    if (!rapport) return {visible: 0, total: 0};
+    const all: MapFleet[] = [
+      ...rapport.flottesJoueur.map(f => ({...f, owner: rapport.joueur.numero})),
+      ...rapport.flottesDetectees.map(f => ({...f, owner: f.proprio || 0})),
+    ];
+    return {
+      total: all.length,
+      visible: all.filter(f => isFleetVisible(f, fleetPowerRange, fleetVisibility)).length,
+    };
+  }, [rapport, fleetPowerRange, fleetVisibility]);
   // Portées radar : désactivées par défaut (voile bleu sur la carte) ; à activer dans les Filtres si besoin
   const [showSystemRadar, setShowSystemRadar] = useState<boolean>(() => {
     const saved = localStorage.getItem('carte_show_system_radar');
@@ -200,13 +223,16 @@ export default function Carte() {
   // Contenu de l'export (mémorisé) : systèmes, radars
   const [exportSystemes, setExportSystemes] = useState<boolean>(() => localStorage.getItem('carte_export_systemes') !== 'false');
   const [exportRadars, setExportRadars] = useState<boolean>(() => localStorage.getItem('carte_export_radars') !== 'false');
+  // Détections propres : inutiles pour un allié (l'alliance les partage déjà), décochées par défaut
+  const [exportDetections, setExportDetections] = useState<boolean>(() => localStorage.getItem('carte_export_detections') === 'true');
   useEffect(() => {
     localStorage.setItem('carte_export_systemes', JSON.stringify(exportSystemes));
     localStorage.setItem('carte_export_radars', JSON.stringify(exportRadars));
-  }, [exportSystemes, exportRadars]);
+    localStorage.setItem('carte_export_detections', JSON.stringify(exportDetections));
+  }, [exportSystemes, exportRadars, exportDetections]);
   const exportText = useMemo(
-    () => (rapport ? exportSystemesJoueur(rapport, {systemes: exportSystemes, radars: exportRadars}) : ''),
-    [rapport, exportSystemes, exportRadars],
+    () => (rapport ? exportSystemesJoueur(rapport, {systemes: exportSystemes, radars: exportRadars, detections: exportDetections}) : ''),
+    [rapport, exportSystemes, exportRadars, exportDetections],
   );
   // Texte affiché, modifiable avant copie ; régénéré quand le texte généré change (cases, rapport)
   const [exportTexteEdite, setExportTexteEdite] = useState('');
@@ -282,6 +308,18 @@ export default function Carte() {
   }, [showFleetBadges]);
 
   useEffect(() => {
+    localStorage.setItem('carte_fleet_power_range', JSON.stringify(fleetPowerRange));
+  }, [fleetPowerRange]);
+
+  useEffect(() => {
+    localStorage.setItem('carte_show_own_fleets', JSON.stringify(showOwnFleets));
+  }, [showOwnFleets]);
+
+  useEffect(() => {
+    localStorage.setItem('carte_show_neutral_fleets', JSON.stringify(showNeutralFleets));
+  }, [showNeutralFleets]);
+
+  useEffect(() => {
     localStorage.setItem('carte_show_system_radar', JSON.stringify(showSystemRadar));
   }, [showSystemRadar]);
 
@@ -338,6 +376,14 @@ export default function Carte() {
       setStabilitySystemPos(`${rapport.joueur.capitale.x}_${rapport.joueur.capitale.y}`);
     }
   }, [rapport, stabilitySystemPos]);
+
+  // « Distance Capitale » : l'option « Capitale » suit la nouvelle capitale ordonnée dans l'écran Revenus (ordre changer_capitale) ;
+  // un autre système choisi explicitement comme centre reste inchangé
+  const capitaleRapportCle = rapport?.joueur?.capitale ? posToString(rapport.joueur.capitale) : undefined;
+  const nouvelleCapitale = useMemo(() => nouvelleCapitaleOrdonnee(rapport), [rapport]);
+  const centreStabilite = nouvelleCapitale && stabilitySystemPos === capitaleRapportCle
+    ? posToString(nouvelleCapitale)
+    : stabilitySystemPos;
 
   const noRapportMessage = !rapport ? (
     <div className="no-rapport-hint" style={{ padding: '6px 14px', background: 'rgba(245, 158, 11, 0.12)', color: '#fbbf24', borderBottom: '1px solid #f59e0b', fontSize: '0.85rem' }}>
@@ -875,6 +921,8 @@ export default function Carte() {
             showCombatBadges={showCombatBadges}
             showOwnerBadges={showOwnerBadges}
             showFleetBadges={showFleetBadges}
+            fleetPowerRange={fleetPowerRange}
+            fleetVisibility={fleetVisibility}
             showSystemRadar={showSystemRadar}
             showFleetRadar={showFleetRadar}
             alliedScanners={showAllyRadar ? radarsAlliesDuTour : undefined}
@@ -888,7 +936,7 @@ export default function Carte() {
             colorMode={colorMode}
             mapTheme={mapTheme}
             showStabilityZones={showStabilityZones}
-            stabilitySystemPos={stabilitySystemPos}
+            stabilitySystemPos={centreStabilite}
             deplacements={ciblesDeplacements}
             dragFleet={dragState && dragCursor ? { from: dragState.from, vitesse: dragState.vitesse, cursor: dragCursor } : null}
             onFleetCellMouseDown={onFleetCellMouseDown}
@@ -1232,6 +1280,16 @@ par diplo
                             Badges flottes
                           </label>
                       </div>
+                      <FleetFilters
+                        enabled={showFleetBadges} range={fleetPowerRange}
+                        visibility={fleetVisibility}
+                        visibleCount={fleetCounts.visible} totalCount={fleetCounts.total}
+                        onRangeChange={setFleetPowerRange}
+                        onVisibilityChange={visibility => {
+                          setShowOwnFleets(visibility.showOwn);
+                          setShowNeutralFleets(visibility.showNeutral);
+                        }}
+                      />
 
                       {zones.length > 0 && (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid #334155', paddingTop: 8 }}>
@@ -1317,6 +1375,9 @@ par diplo
                           <select
                               value={stabilitySystemPos || ''}
                               onChange={(e) => setStabilitySystemPos(e.target.value)}
+                              title={nouvelleCapitale
+                                  ? `Un changement de capitale vers ${nouvelleCapitale.x}_${nouvelleCapitale.y} est ordonné dans l'écran Revenus : l'option « Nouvelle capitale » centre les zones sur elle.`
+                                  : undefined}
                               style={{
                                   background: '#1e2530',
                                   color: '#f1f5f9',
@@ -1328,7 +1389,9 @@ par diplo
                           >
                               {rapport?.joueur?.capitale && (
                                   <option value={`${rapport.joueur.capitale.x}_${rapport.joueur.capitale.y}`}>
-                                      Capitale ({rapport.joueur.capitale.x}_{rapport.joueur.capitale.y})
+                                      {nouvelleCapitale
+                                          ? `Nouvelle capitale (${nouvelleCapitale.x}_${nouvelleCapitale.y}), ordre Revenus`
+                                          : `Capitale (${rapport.joueur.capitale.x}_${rapport.joueur.capitale.y})`}
                                   </option>
                               )}
                               {(rapport?.systemesJoueur || [])
@@ -1622,7 +1685,7 @@ par diplo
       {showExport && (
         <Modal title="Exporter mes systèmes" onClose={() => setShowExport(false)} panelStyle={{ minWidth: 600, maxWidth: '80%' }}>
           <p style={{ marginTop: 0 }}>
-            Transmettez ce texte à un allié (Discord, mail, Drive…) : il le colle dans « Importer systèmes ».
+            Transmettez ce texte à un allié ou à un autre commandant (Discord, mail, Drive…) : il le colle dans « Importer systèmes ».
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
@@ -1632,6 +1695,13 @@ par diplo
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
               <input type="checkbox" checked={exportRadars} onChange={(e) => { setExportRadars(e.target.checked); setExportFeedback(null); }} />
               Mes portées radar (systèmes et flottes, position à ce tour)
+            </label>
+            <label
+              style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+              title="Systèmes détectés à ce tour par vos propres radars et scanners. Les détections de vos alliés sont écartées : utile pour un commandant hors de l'alliance (un allié les reçoit déjà)."
+            >
+              <input type="checkbox" checked={exportDetections} onChange={(e) => { setExportDetections(e.target.checked); setExportFeedback(null); }} />
+              Mes détections (systèmes vus par mes radars à ce tour, sans celles des alliés)
             </label>
           </div>
           <textarea

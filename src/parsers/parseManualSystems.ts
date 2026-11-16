@@ -1,5 +1,5 @@
 import {Rapport, SystemeDetecte, XY} from '../types';
-import {parsePosString} from '../utils/position';
+import {getTorusDistance, parsePosString} from '../utils/position';
 
 /** Portée radar d'un système ou d'une flotte d'un allié (case détectée : distance de Tchebychev ≤ scan) */
 export type RadarAllie = {
@@ -93,14 +93,19 @@ export function parseManualDetectedSystems(text: string): ManualParseResult {
  * il le colle dans « Importer systèmes » (parseManualDetectedSystems). Les systèmes du joueur ne
  * sont pas partagés automatiquement par l'alliance, contrairement aux détections.
  * Suivent les portées radar des systèmes et des flottes du joueur (position au tour du rapport).
- * `contenu` choisit ce qui est exporté (les deux par défaut).
+ * Les détections propres (facultatives) sont les systèmes détectés à ce tour qui sont à portée d'un radar
+ * de système ou d'un scanner de flotte du joueur (distance de Tchebychev ≤ portée, comme
+ * `Commandant.determinerSystemesDetectes`) : celles mises en commun par l'alliance sont écartées, pour
+ * pouvoir les transmettre à un commandant hors de l'alliance.
+ * `contenu` choisit ce qui est exporté (systèmes et radars par défaut, sans les détections).
  */
 export function exportSystemesJoueur(
-  rapport: Pick<Rapport, 'tour' | 'joueur' | 'systemesJoueur'> & Partial<Pick<Rapport, 'flottesJoueur'>>,
-  contenu: { systemes?: boolean; radars?: boolean } = {},
+  rapport: Pick<Rapport, 'tour' | 'joueur' | 'systemesJoueur'> & Partial<Pick<Rapport, 'flottesJoueur' | 'systemesDetectesDuTour'>>,
+  contenu: { systemes?: boolean; radars?: boolean; detections?: boolean } = {},
 ): string {
   const avecSystemes = contenu.systemes ?? true;
   const avecRadars = contenu.radars ?? true;
+  const avecDetections = contenu.detections ?? false;
   const propre = (s: string) => s.replace(/[;\r\n]+/g, ' ').trim();
   const lignes = !avecSystemes ? [] : rapport.systemesJoueur.map(s => {
     const autres = (s.proprietaires || []).filter(o => o !== 0);
@@ -116,17 +121,50 @@ export function exportSystemesJoueur(
       `tour=${rapport.tour}`,
     ].join('; ');
   });
-  const radars = !avecRadars ? [] : [...rapport.systemesJoueur, ...(rapport.flottesJoueur || [])]
-    .filter(o => Number(o.scan) > 0)
+  const observateurs = [...rapport.systemesJoueur, ...(rapport.flottesJoueur || [])]
+    .filter(o => Number(o.scan) > 0);
+  const radars = !avecRadars ? [] : observateurs
     .map(o => `radar=${Number(o.scan)}; pos=0_${o.pos.x}_${o.pos.y}; cdt=${rapport.joueur.numero}; tour=${rapport.tour}`);
+  const detections = !avecDetections ? [] : detectionsPropres(rapport, observateurs).map(s => [
+    `nbpla=${s.nbPla}`,
+    `nom=${propre(s.nom)}`,
+    ...(s.pop != null ? [`pop=${s.pop}`] : []),
+    ...(s.popMax != null ? [`popMax=${s.popMax}`] : []),
+    `pos=0_${s.pos.x}_${s.pos.y}`,
+    `typeEtoile=${s.typeEtoile}`,
+    `proprios=${(s.proprietaires || []).join(',')}`,
+    `tour=${s.tour ?? rapport.tour}`,
+  ].join('; '));
   const parties = [
     ...(avecSystemes ? [`${lignes.length} système(s)`] : []),
+    ...(avecDetections ? [`${detections.length} détection(s)`] : []),
     ...(avecRadars ? [`${radars.length} radar(s)`] : []),
   ];
   if (!parties.length) return '';
   const entete = `# Systèmes de ${propre(rapport.joueur.nom || '')} (n°${rapport.joueur.numero}), tour ${rapport.tour} : ` +
     `${parties.join(' et ')}, à coller dans « Importer systèmes » de l'outil d'aide`;
-  return [entete, ...lignes, ...radars].join('\n');
+  return [entete, ...lignes, ...detections, ...radars].join('\n');
+}
+
+/**
+ * Systèmes détectés à ce tour par les radars du joueur lui-même (systèmes et flottes), sans ceux que
+ * l'alliance a mis en commun ni ceux où le joueur a une planète. Triés par position.
+ */
+export function detectionsPropres(
+  rapport: Pick<Rapport, 'systemesJoueur'> & Partial<Pick<Rapport, 'flottesJoueur' | 'systemesDetectesDuTour'>>,
+  observateurs: { pos: XY; scan: number }[] = [...rapport.systemesJoueur, ...(rapport.flottesJoueur || [])],
+): SystemeDetecte[] {
+  const radars = observateurs.filter(o => Number(o.scan) > 0);
+  const possedes = new Set(rapport.systemesJoueur.map(s => `${s.pos.x}_${s.pos.y}`));
+  const vus = new Set<string>();
+  return (rapport.systemesDetectesDuTour || [])
+    .filter(s => {
+      const cle = `${s.pos.x}_${s.pos.y}`;
+      if (possedes.has(cle) || vus.has(cle)) return false;
+      vus.add(cle);
+      return radars.some(o => getTorusDistance(o.pos, s.pos) <= Number(o.scan));
+    })
+    .sort((a, b) => a.pos.x - b.pos.x || a.pos.y - b.pos.y);
 }
 
 function safeInt(s: string): number {

@@ -90,3 +90,35 @@ describe('radars des alliés', () => {
     expect(errors).toHaveLength(1);
   });
 });
+
+describe('détections propres', () => {
+  const detecte = (nom: string, x: number, y: number, proprietaires: number[] = []) =>
+    ({type: 'detecte', nom, pos: {x, y}, typeEtoile: 2, nbPla: 5, proprietaires, pop: 100, popMax: 800, tour: 7} as const);
+  const avecDetections = {
+    ...rapport,
+    systemesJoueur: [systeme({scan: 2})], // radar de système en (10,20), portée 2
+    flottesJoueur: [{pos: {x: 40, y: 59}, scan: 3} as any], // scanner de flotte près du bord du tore
+    systemesDetectesDuTour: [
+      detecte('Proche', 12, 21, [3]),     // à 2 du système : vu par le joueur
+      detecte('Loin', 13, 20),            // à 3 du système : vu par un allié seulement
+      detecte('Bord', 41, 2, [4]),        // à 3 de la flotte en passant par le bord (60×60)
+      detecte('Alpha', 10, 20, [7]),      // système du joueur : déjà dans « Mes systèmes »
+    ],
+  };
+
+  test('seuls les systèmes à portée des radars du joueur sont exportés', () => {
+    const lignes = exportSystemesJoueur(avecDetections, {systemes: false, radars: false, detections: true}).split('\n');
+    expect(lignes[0]).toMatch(/: 2 détection\(s\), à coller/);
+    expect(lignes.slice(1)).toEqual([
+      'nbpla=5; nom=Proche; pop=100; popMax=800; pos=0_12_21; typeEtoile=2; proprios=3; tour=7',
+      'nbpla=5; nom=Bord; pop=100; popMax=800; pos=0_41_2; typeEtoile=2; proprios=4; tour=7',
+    ]);
+  });
+
+  test('décochées par défaut, et relues par l’import', () => {
+    expect(exportSystemesJoueur(avecDetections)).not.toMatch(/détection/);
+    const {systems, errors} = parseManualDetectedSystems(exportSystemesJoueur(avecDetections, {detections: true}));
+    expect(errors).toEqual([]);
+    expect(systems.map(s => s.nom)).toEqual(['Alpha', 'Proche', 'Bord']);
+  });
+});

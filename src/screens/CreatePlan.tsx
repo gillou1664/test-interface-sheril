@@ -240,7 +240,7 @@ export default function CreatePlan() {
             if (t.base === 'bouclier') countBouclier += e.qty;
             if (t.base === 'moteur') countReacteur += e.qty;
 
-            if (rapport && !rapport.technologiesConnues.includes(e.code)) {
+            if (rapport && !t.publique && !rapport.technologiesConnues.includes(e.code)) {
                 missingTechs.push(`${t.nom} (type ${toRoman(t.niv)})`);
             }
 
@@ -448,7 +448,7 @@ export default function CreatePlan() {
                     pt.type === 1 && pt.base === t.base && pt.niv === t.niv - 1
                 );
 
-                const isKnown = !rapport || rapport.technologiesConnues.includes(e.code);
+                const isKnown = !rapport || t.publique || rapport.technologiesConnues.includes(e.code);
 
                 return (
                     <tr key={e.code} style={{backgroundColor: isKnown ? 'transparent' : 'rgba(255, 0, 0, 0.1)'}}>
@@ -630,7 +630,7 @@ export default function CreatePlan() {
             )}</div>
         <textarea
             style={{width: '100%', backgroundColor: 'white', padding: '10px', color: '#000'}}
-            defaultValue={ajouterPrefixeSchema('plan', blueprint)}
+            value={entries.length > 0 ? ajouterPrefixeSchema('plan', blueprint) : ''}
             readOnly={true}
             onFocus={(e) => e.target.select()}
         ></textarea>
