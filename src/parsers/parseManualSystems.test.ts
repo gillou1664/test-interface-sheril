@@ -115,6 +115,17 @@ describe('détections propres', () => {
     ]);
   });
 
+  test('détections de l’alliance : celles hors de portée du joueur', () => {
+    const lignes = exportSystemesJoueur(avecDetections, {systemes: false, radars: false, detectionsAlliance: true}).split('\n');
+    expect(lignes[0]).toMatch(/: 1 détection\(s\) de l'alliance, à coller/);
+    expect(lignes.slice(1)).toEqual(['nbpla=5; nom=Loin; pop=100; popMax=800; pos=0_13_20; typeEtoile=2; proprios=; tour=7']);
+    const lesDeux = exportSystemesJoueur(avecDetections, {systemes: false, radars: false, detections: true, detectionsAlliance: true});
+    expect(lesDeux.split('\n')[0]).toMatch(/: 2 détection\(s\) et 1 détection\(s\) de l'alliance/);
+    const {systems, errors} = parseManualDetectedSystems(lesDeux);
+    expect(errors).toEqual([]);
+    expect(systems.map(s => s.nom)).toEqual(['Proche', 'Bord', 'Loin']);
+  });
+
   test('décochées par défaut, et relues par l’import', () => {
     expect(exportSystemesJoueur(avecDetections)).not.toMatch(/détection/);
     const {systems, errors} = parseManualDetectedSystems(exportSystemesJoueur(avecDetections, {detections: true}));

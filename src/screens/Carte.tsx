@@ -225,14 +225,16 @@ export default function Carte() {
   const [exportRadars, setExportRadars] = useState<boolean>(() => localStorage.getItem('carte_export_radars') !== 'false');
   // Détections propres : inutiles pour un allié (l'alliance les partage déjà), décochées par défaut
   const [exportDetections, setExportDetections] = useState<boolean>(() => localStorage.getItem('carte_export_detections') === 'true');
+  const [exportDetectionsAlliance, setExportDetectionsAlliance] = useState<boolean>(() => localStorage.getItem('carte_export_detections_alliance') === 'true');
   useEffect(() => {
     localStorage.setItem('carte_export_systemes', JSON.stringify(exportSystemes));
     localStorage.setItem('carte_export_radars', JSON.stringify(exportRadars));
     localStorage.setItem('carte_export_detections', JSON.stringify(exportDetections));
-  }, [exportSystemes, exportRadars, exportDetections]);
+    localStorage.setItem('carte_export_detections_alliance', JSON.stringify(exportDetectionsAlliance));
+  }, [exportSystemes, exportRadars, exportDetections, exportDetectionsAlliance]);
   const exportText = useMemo(
-    () => (rapport ? exportSystemesJoueur(rapport, {systemes: exportSystemes, radars: exportRadars, detections: exportDetections}) : ''),
-    [rapport, exportSystemes, exportRadars, exportDetections],
+    () => (rapport ? exportSystemesJoueur(rapport, {systemes: exportSystemes, radars: exportRadars, detections: exportDetections, detectionsAlliance: exportDetectionsAlliance}) : ''),
+    [rapport, exportSystemes, exportRadars, exportDetections, exportDetectionsAlliance],
   );
   // Texte affiché, modifiable avant copie ; régénéré quand le texte généré change (cases, rapport)
   const [exportTexteEdite, setExportTexteEdite] = useState('');
@@ -1702,6 +1704,13 @@ par diplo
             >
               <input type="checkbox" checked={exportDetections} onChange={(e) => { setExportDetections(e.target.checked); setExportFeedback(null); }} />
               Mes détections (systèmes vus par mes radars à ce tour, sans celles des alliés)
+            </label>
+            <label
+              style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+              title="Systèmes détectés à ce tour hors de portée de vos radars : ils viennent des détections mises en commun par votre alliance."
+            >
+              <input type="checkbox" checked={exportDetectionsAlliance} onChange={(e) => { setExportDetectionsAlliance(e.target.checked); setExportFeedback(null); }} />
+              Détections de mon alliance (systèmes vus à ce tour par mes alliés seulement)
             </label>
           </div>
           <textarea
