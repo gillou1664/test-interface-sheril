@@ -91,6 +91,58 @@ describe('radars des alliés', () => {
   });
 });
 
+describe('flottes', () => {
+  const flotteJoueur = (over: any) => ({type: 'joueur', proprio: 7, num: 1, nom: 'Garde', pos: {x: 10, y: 20}, nbVso: 4,
+    vaisseaux: [], directive: 0, vitesse: 3, as: 150, ap: 100, scan: 0, ...over});
+  const avecFlottes = {
+    ...rapport,
+    systemesJoueur: [systeme({scan: 2})],
+    flottesJoueur: [flotteJoueur({}), flotteJoueur({num: 2, nom: 'Sco;ut', pos: {x: 30, y: 30}, as: 0, ap: 0, nbVso: 1})] as any,
+    flottesDetectees: [
+      {type: 'detecte', num: 5, nom: 'Intrus', pos: {x: 11, y: 21}, nbVso: 3, proprio: 3, puiss: 'petite'},     // à portée
+      {type: 'detecte', num: 8, nom: 'Lointaine', pos: {x: 25, y: 25}, nbVso: 9, proprio: 4, puiss: 'moyenne'}, // alliance
+    ] as any,
+  };
+
+  test('décochées par défaut : aucune ligne flotte', () => {
+    expect(exportSystemesJoueur(avecFlottes, {detections: true, detectionsAlliance: true})).not.toMatch(/flotte=/);
+  });
+
+  test('mes flottes : puissance en toutes lettres, sans AS ni AP', () => {
+    const lignes = exportSystemesJoueur(avecFlottes, {radars: false, typeSystemes: false, typeFlottes: true}).split('\n');
+    expect(lignes[0]).toMatch(/: 2 flotte\(s\), à coller/);
+    expect(lignes.slice(1)).toEqual([
+      'flotte=1; nom=Garde; pos=0_10_20; proprio=7; nbVso=4; puiss=moyenne; tour=7',
+      'flotte=2; nom=Sco ut; pos=0_30_30; proprio=7; nbVso=1; puiss=insignifiante; tour=7',
+    ]);
+  });
+
+  test('flottes détectées réparties entre détections propres et de l’alliance', () => {
+    const propres = exportSystemesJoueur(avecFlottes, {systemes: false, radars: false, detections: true, typeSystemes: false, typeFlottes: true});
+    expect(propres.split('\n').slice(1)).toEqual(['flotte=5; nom=Intrus; pos=0_11_21; proprio=3; nbVso=3; puiss=petite; tour=7']);
+    const alliance = exportSystemesJoueur(avecFlottes, {systemes: false, radars: false, detectionsAlliance: true, typeSystemes: false, typeFlottes: true});
+    expect(alliance.split('\n').slice(1)).toEqual(['flotte=8; nom=Lointaine; pos=0_25_25; proprio=4; nbVso=9; puiss=moyenne; tour=7']);
+  });
+
+  test('l’import relit les flottes', () => {
+    const texte = exportSystemesJoueur(avecFlottes, {radars: false, detections: true, typeFlottes: true});
+    const {systems, flottes, errors} = parseManualDetectedSystems(texte);
+    expect(errors).toEqual([]);
+    expect(systems).toHaveLength(1);
+    expect(flottes).toEqual([
+      {type: 'detecte', num: 1, nom: 'Garde', pos: {x: 10, y: 20}, nbVso: 4, proprio: 7, puiss: 'moyenne', tour: 7},
+      {type: 'detecte', num: 2, nom: 'Sco ut', pos: {x: 30, y: 30}, nbVso: 1, proprio: 7, puiss: 'insignifiante', tour: 7},
+      {type: 'detecte', num: 5, nom: 'Intrus', pos: {x: 11, y: 21}, nbVso: 3, proprio: 3, puiss: 'petite', tour: 7},
+    ]);
+  });
+
+  test('une flotte sans propriétaire est une erreur', () => {
+    const {flottes, errors} = parseManualDetectedSystems('flotte=3; pos=0_10_10; tour=7');
+    expect(flottes).toEqual([]);
+    expect(errors).toHaveLength(1);
+  });
+});
+
 describe('détections propres', () => {
   const detecte = (nom: string, x: number, y: number, proprietaires: number[] = []) =>
     ({type: 'detecte', nom, pos: {x, y}, typeEtoile: 2, nbPla: 5, proprietaires, pop: 100, popMax: 800, tour: 7} as const);
