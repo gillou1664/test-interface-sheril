@@ -223,13 +223,16 @@ export default function Carte() {
   // Contenu de l'export (mémorisé) : systèmes, radars
   const [exportSystemes, setExportSystemes] = useState<boolean>(() => localStorage.getItem('carte_export_systemes') !== 'false');
   const [exportRadars, setExportRadars] = useState<boolean>(() => localStorage.getItem('carte_export_radars') !== 'false');
+  // Détections propres : inutiles pour un allié (l'alliance les partage déjà), décochées par défaut
+  const [exportDetections, setExportDetections] = useState<boolean>(() => localStorage.getItem('carte_export_detections') === 'true');
   useEffect(() => {
     localStorage.setItem('carte_export_systemes', JSON.stringify(exportSystemes));
     localStorage.setItem('carte_export_radars', JSON.stringify(exportRadars));
-  }, [exportSystemes, exportRadars]);
+    localStorage.setItem('carte_export_detections', JSON.stringify(exportDetections));
+  }, [exportSystemes, exportRadars, exportDetections]);
   const exportText = useMemo(
-    () => (rapport ? exportSystemesJoueur(rapport, {systemes: exportSystemes, radars: exportRadars}) : ''),
-    [rapport, exportSystemes, exportRadars],
+    () => (rapport ? exportSystemesJoueur(rapport, {systemes: exportSystemes, radars: exportRadars, detections: exportDetections}) : ''),
+    [rapport, exportSystemes, exportRadars, exportDetections],
   );
   // Texte affiché, modifiable avant copie ; régénéré quand le texte généré change (cases, rapport)
   const [exportTexteEdite, setExportTexteEdite] = useState('');
@@ -1682,7 +1685,7 @@ par diplo
       {showExport && (
         <Modal title="Exporter mes systèmes" onClose={() => setShowExport(false)} panelStyle={{ minWidth: 600, maxWidth: '80%' }}>
           <p style={{ marginTop: 0 }}>
-            Transmettez ce texte à un allié (Discord, mail, Drive…) : il le colle dans « Importer systèmes ».
+            Transmettez ce texte à un allié ou à un autre commandant (Discord, mail, Drive…) : il le colle dans « Importer systèmes ».
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
@@ -1692,6 +1695,13 @@ par diplo
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
               <input type="checkbox" checked={exportRadars} onChange={(e) => { setExportRadars(e.target.checked); setExportFeedback(null); }} />
               Mes portées radar (systèmes et flottes, position à ce tour)
+            </label>
+            <label
+              style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+              title="Systèmes détectés à ce tour par vos propres radars et scanners. Les détections de vos alliés sont écartées : utile pour un commandant hors de l'alliance (un allié les reçoit déjà)."
+            >
+              <input type="checkbox" checked={exportDetections} onChange={(e) => { setExportDetections(e.target.checked); setExportFeedback(null); }} />
+              Mes détections (systèmes vus par mes radars à ce tour, sans celles des alliés)
             </label>
           </div>
           <textarea
